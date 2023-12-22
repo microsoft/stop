@@ -3,6 +3,8 @@ import os
 import time
 import traceback
 import importlib
+import platform
+import faulthandler
 
 def extract_code(algorithm_str):
     if isinstance(algorithm_str, str):
@@ -68,12 +70,91 @@ def run_by_creating_file(define_fn_str, base_name):
             attempts += 1
         except Exception as e:
             print("Failed to import module with exception", e)
+            print(traceback.format_exc())
             raise e
     # Get the function
     fn = getattr(module, base_name)
     return fn
 
-def temp_override(define_fn_str, base_name, update_globals=True, use_sandbox=True):
+
+def reliability_guard(maximum_memory_bytes = None):
+    """
+    Based on humaneval sandbox - slightly less restrictive:
+    https://github.com/openai/human-eval/blob/master/human_eval/execution.py
+
+    This disables various destructive functions and prevents the generated code
+    from interfering with the test (e.g. fork bomb, killing other processes,
+    removing filesystem files, etc.)
+
+    WARNING
+    This function is NOT a security sandbox. Untrusted code, including, model-
+    generated code, should not be blindly executed outside of one. See the 
+    Codex paper for more information about OpenAI's code sandbox, and proceed
+    with caution.
+    """
+
+    if maximum_memory_bytes is not None:
+        import resource
+        resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
+        resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
+        if not platform.uname().system == 'Darwin':
+            resource.setrlimit(resource.RLIMIT_STACK, (maximum_memory_bytes, maximum_memory_bytes))
+
+    faulthandler.disable()
+
+    import builtins
+    builtins.exit = None
+    builtins.quit = None
+
+    os.kill = None
+    os.system = None
+    # os.putenv = None
+    os.remove = None
+    os.removedirs = None
+    os.rmdir = None
+    os.fchdir = None
+    os.setuid = None
+    os.fork = None
+    os.forkpty = None
+    os.killpg = None
+    os.rename = None
+    os.renames = None
+    os.truncate = None
+    os.replace = None
+    os.unlink = None
+    os.fchmod = None
+    os.fchown = None
+    os.chmod = None
+    os.chown = None
+    os.chroot = None
+    os.fchdir = None
+    os.lchflags = None
+    os.lchmod = None
+    os.lchown = None
+    os.getcwd = None
+    os.chdir = None
+
+    import shutil
+    shutil.rmtree = None
+    shutil.move = None
+    shutil.chown = None
+
+    # import subprocess
+    # subprocess.Popen = None  # type: ignore
+
+    __builtins__['help'] = None
+
+    import sys
+    sys.modules['ipdb'] = None
+    # sys.modules['joblib'] = None
+    sys.modules['resource'] = None
+    sys.modules['psutil'] = None
+    sys.modules['tkinter'] = None
+
+def temp_override(define_fn_str, base_name, update_globals=True, use_sandbox=True, strict_sandbox=True):
+    """
+    Overrides a function temporarily.
+    """
     if define_fn_str is None:
         raise Exception("define_fn_str is None in temp_override")
     if use_sandbox:
@@ -81,6 +162,25 @@ def temp_override(define_fn_str, base_name, update_globals=True, use_sandbox=Tru
         for filtered_str in filtered_strings:
             if filtered_str in define_fn_str:
                 raise Exception(f"{filtered_str} is not supported in temp_override")
+        if strict_sandbox:
+            if not os.path.exists("acknowledge_strict_sandbox.txt"):
+                print("WARNING: Although this script mode is less likely to crash your computer, it is still not a true sandbox and may cause your computer to crash. You should not run this script anywhere where you would not allow a stranger to run arbitrary code.")
+                acknowledge_strict_sandbox = input("Confirm that you acknowledge this (y/n): ")
+                if acknowledge_strict_sandbox != "y":
+                    raise Exception("Aborting due to sandbox warning")
+                else:
+                    write_str_to_file("", "acknowledge_strict_sandbox.txt")
+            reliability_guard()
+        else:
+            if not os.path.exists("acknowledge_unsafe.txt"):
+                print("WARNING: You are using temp_override without a strict sandbox. This is particularly unsafe and may cause your computer to crash.")
+                acknowledge_unsafe = input("Confirm that you acknowledge this (y/n): ")
+                if acknowledge_unsafe != "y":
+                    raise Exception("Aborting due to sandbox warning")
+                else:
+                    write_str_to_file("", "acknowledge_unsafe.txt")
+                
+
     new_globals = globals().copy()
     if base_name in new_globals:
         del new_globals[base_name]
@@ -158,12 +258,18 @@ def get_utility_strs(task):
     return read_file_as_str(f"tasks/{task}/utility.py"), read_file_as_str(f"tasks/{task}/secret_utility.py")
 
 def end_pool_if_used(pool, join_pools=False):
+    """
+    Ends a pool if it is used.
+    """
     if pool is not None:
         pool.stop()
         if join_pools:
             pool.join()
 
 def write_log(expected_utility_val, expected_utility_test, run_id):
+    """
+    Writes the expected utility to a log file.
+    """
     print("Saving to file")
     with open(f"results/{run_id}/meta_utility_log.txt", "a") as f:
         f.write(f"{expected_utility_val},{expected_utility_test}\n")

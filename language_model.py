@@ -312,7 +312,7 @@ class LanguageModel:
                 ).choices)
             else:
                 result.extend(openai.ChatCompletion.create(
-                    model='gpt-4-0314', messages=messages, n=n_responses, temperature=temperature,
+                    model=engine, messages=messages, n=n_responses, temperature=temperature,
                     max_tokens=max_tokens, timeout=global_timeout
                 ).choices)
 
